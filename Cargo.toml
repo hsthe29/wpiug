@@ -1,0 +1,12 @@
+[package]
+name = "wpiug"
+version = "0.2.0"
+edition = "2021"
+description = "What Process Is Using GPU - inspect GPU processes and their container/process trees"
+
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
