@@ -5,13 +5,21 @@ USAGE:
     wpiug                    Query every GPU on the machine (default)
     wpiug <ID>...            Query only the given GPU index(es), e.g. `wpiug 0` or `wpiug 0,3`
 
+MODES:
+    -sp, --show-processes    Detail as a process tree per GPU (the default)
+    -sc, --show-containers   Detail as a matrix of VRAM per container and GPU, with the
+                             user owning each; host processes get one column per user.
+                             Give both flags to get both sections
+
 FLAGS:
     --depth <N>              Tree levels to draw from each GPU process down, counting itself
                              (default: 3, minimum: 1). GPU processes are always shown
     -a, --all                Query all GPUs (the default; accepted for explicitness)
-    --ascii                  Draw the tree with ASCII instead of box-drawing characters
-    -w                       Show each process's command, truncated to the terminal width
-    -ww                      Show each process's command in full, never truncated (like `ps`)
+    --ascii                  Draw with ASCII instead of box-drawing characters
+    -w                       Tree: show each process's command, cut to the terminal width
+                             Matrix: widen container names to fill the terminal
+                             (by default they are cut at 16 characters)
+    -ww                      Show commands and container names in full, never cut (like `ps`)
     --color / --no-color     Force colour on or off (default: on when stdout is a terminal)
     -h, --help               Print this help
     -V, --version            Print version
@@ -40,6 +48,11 @@ pub struct Args {
     pub wide: Wide,
     /// `None` = decide from the terminal at render time.
     pub color: Option<bool>,
+    /// Draw the process tree (`-sp`) - also what you get when neither mode
+    /// is asked for.
+    pub show_processes: bool,
+    /// Draw the container x GPU VRAM matrix (`-sc`).
+    pub show_containers: bool,
 }
 
 pub enum Parsed {
@@ -53,6 +66,8 @@ pub fn parse<I: Iterator<Item = String>>(argv: I) -> Result<Parsed, String> {
     let mut ascii = false;
     let mut wide = 0usize;
     let mut color: Option<bool> = None;
+    let mut processes = false;
+    let mut containers = false;
     let mut ids: Vec<u32> = Vec::new();
     let mut depth: usize = 3;
     let mut it = argv.peekable();
@@ -68,6 +83,8 @@ pub fn parse<I: Iterator<Item = String>>(argv: I) -> Result<Parsed, String> {
             "-ww" => wide += 2,
             "--color" => color = Some(true),
             "--no-color" => color = Some(false),
+            "-sp" | "--show-processes" => processes = true,
+            "-sc" | "--show-containers" => containers = true,
             "--depth" => {
                 let v = it
                     .next()
@@ -114,6 +131,9 @@ pub fn parse<I: Iterator<Item = String>>(argv: I) -> Result<Parsed, String> {
             _ => Wide::Full,
         },
         color,
+        // The tree is the default view; `-sc` alone swaps it for the matrix.
+        show_processes: processes || !containers,
+        show_containers: containers,
     }))
 }
 

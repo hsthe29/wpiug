@@ -5,6 +5,8 @@ use std::fs;
 pub struct ProcInfo {
     pub ppid: u32,
     pub name: String,
+    /// Effective uid - the owner `ps` shows. `None` if status had no Uid line.
+    pub uid: Option<u32>,
 }
 
 pub struct ProcTable {
@@ -15,6 +17,10 @@ pub struct ProcTable {
 impl ProcTable {
     pub fn name(&self, pid: u32) -> &str {
         self.by_pid.get(&pid).map_or("?", |p| p.name.as_str())
+    }
+
+    pub fn uid(&self, pid: u32) -> Option<u32> {
+        self.by_pid.get(&pid)?.uid
     }
 
     pub fn children_of(&self, pid: u32) -> &[u32] {
@@ -77,12 +83,16 @@ pub fn snapshot() -> ProcTable {
 
             let mut name = String::new();
             let mut ppid = 0u32;
+            let mut uid = None;
             for line in status.lines() {
                 if let Some(v) = line.strip_prefix("Name:") {
                     name = v.trim().to_string();
                 } else if let Some(v) = line.strip_prefix("PPid:") {
                     ppid = v.trim().parse().unwrap_or(0);
-                    break; // PPid always follows Name in /proc/<pid>/status
+                } else if let Some(v) = line.strip_prefix("Uid:") {
+                    // Real, effective, saved, fs; `ps` reports the effective one.
+                    uid = v.split_whitespace().nth(1).and_then(|u| u.parse().ok());
+                    break; // Name, PPid, Uid always come in that order
                 }
             }
             if name.is_empty() {
@@ -90,7 +100,7 @@ pub fn snapshot() -> ProcTable {
             }
 
             children.entry(ppid).or_default().push(pid);
-            by_pid.insert(pid, ProcInfo { ppid, name });
+            by_pid.insert(pid, ProcInfo { ppid, name, uid });
         }
     }
 

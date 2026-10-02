@@ -5,6 +5,8 @@
 //!   * `/sys/class/kfd/kfd/proc/<pid>` - per-process VRAM and queues, keyed by
 //!     the KFD `gpu_id`, which we tie back to a card through the topology
 //!     node's `drm_render_minor`.
+//!
+//! KFD's VRAM figure misses some allocations; `drm.rs` makes up for it.
 
 use std::collections::HashMap;
 use std::fs;
@@ -18,6 +20,8 @@ const AMD_VENDOR: &str = "0x1002";
 pub struct Gpu {
     /// Logical index, ordered by PCI address - the same numbering rocm-smi uses.
     pub index: u32,
+    /// PCI address, e.g. `0000:83:00.0` - what DRM fdinfo calls `drm-pdev`.
+    pub pci: String,
     /// KFD gpu_id, absent if the card has no KFD topology node.
     pub gpu_id: Option<u32>,
     pub vram_used: u64,
@@ -103,8 +107,9 @@ pub fn discover_gpus() -> Result<Vec<Gpu>, String> {
     let gpus = found
         .into_iter()
         .enumerate()
-        .map(|(i, (_pci, minor, vram_used, vram_total, busy))| Gpu {
+        .map(|(i, (pci, minor, vram_used, vram_total, busy))| Gpu {
             index: i as u32,
+            pci,
             gpu_id: minor.and_then(|m| minor_to_gpu_id.get(&m).copied()),
             vram_used,
             vram_total,
@@ -200,11 +205,16 @@ pub fn discover_procs(gpus: &[Gpu]) -> Vec<GpuProc> {
         }
     }
 
-    out.sort_by(|a, b| {
+    sort_procs(&mut out);
+    out
+}
+
+/// By GPU, then largest VRAM first - the order every view draws them in.
+pub fn sort_procs(procs: &mut [GpuProc]) {
+    procs.sort_by(|a, b| {
         a.gpu_index
             .cmp(&b.gpu_index)
             .then(b.vram.cmp(&a.vram))
             .then(a.pid.cmp(&b.pid))
     });
-    out
 }

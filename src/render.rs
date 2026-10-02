@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::amd::Gpu;
-use crate::util::{ellipsize, pad_left, pad_right, width};
+use crate::util::{ellipsize, pad_left, pad_right, truncate, width};
 
 /// Widest the banners get, and the width assumed when no terminal answers.
 pub const WIDTH: usize = 124;
@@ -359,6 +359,205 @@ fn id_ranges(ids: &[u32]) -> String {
         i += 1;
     }
     parts.join(",")
+}
+
+/// Container names are cut here unless `-w`/`-ww` say otherwise, so a
+/// handful of containers still fit side by side.
+pub const NAME_CAP: usize = 16;
+
+/// One column of the Container Detail matrix: a container, or one user's
+/// processes running on the host.
+pub struct Column {
+    /// Container name (or short id); `None` for processes on the host.
+    pub container: Option<String>,
+    /// Owners of the column's GPU processes, in the order first seen.
+    pub users: Vec<String>,
+    /// VRAM on each GPU row, `None` where the column has no process there.
+    pub vram: Vec<Option<u64>>,
+}
+
+impl Column {
+    pub fn total(&self) -> u64 {
+        self.vram.iter().flatten().sum()
+    }
+
+    fn name(&self) -> &str {
+        self.container.as_deref().unwrap_or("host")
+    }
+}
+
+/// How much of each container name the matrix header shows.
+pub enum NameWidth {
+    /// Cut at `NAME_CAP` - the default.
+    Cap,
+    /// `-w`: as wide as this terminal width allows, never less than the default.
+    Fit(usize),
+    /// `-ww`: whole names, however wide the table gets.
+    Full,
+}
+
+/// The Container Detail matrix: a column per container (with the user owning
+/// it underneath), a row per GPU, VRAM in the cells and a Total row. A cell is
+/// `-` where the column has nothing on that GPU.
+pub fn container_matrix(
+    gpus: &[u32],
+    cols: &[Column],
+    names: &NameWidth,
+    g: &Glyphs,
+    color: bool,
+) -> Vec<String> {
+    let users: Vec<String> = cols.iter().map(|c| c.users.join(",")).collect();
+    let cells: Vec<Vec<String>> = cols
+        .iter()
+        .map(|c| {
+            c.vram
+                .iter()
+                .map(|v| v.map_or_else(|| "-".to_string(), human_bytes))
+                .collect()
+        })
+        .collect();
+    let totals: Vec<String> = cols.iter().map(|c| human_bytes(c.total())).collect();
+
+    let gpu_w = gpus
+        .iter()
+        .map(|i| width(&i.to_string()))
+        .chain([width("GPU"), width("Total")])
+        .max()
+        .unwrap_or_default();
+    // Everything in a column except its name: those set a floor the name can
+    // be cut down to, but never below.
+    let body: Vec<usize> = (0..cols.len())
+        .map(|i| widest(&cells[i]).max(width(&users[i])).max(width(&totals[i])))
+        .collect();
+    let table_w = |cap: usize| -> usize {
+        gpu_w
+            + cols
+                .iter()
+                .zip(&body)
+                .map(|(c, b)| GAP.len() + width(c.name()).min(cap).max(*b))
+                .sum::<usize>()
+    };
+    let longest = cols.iter().map(|c| width(c.name())).max().unwrap_or_default();
+    let cap = match names {
+        NameWidth::Cap => NAME_CAP,
+        NameWidth::Full => longest,
+        // The widest cut that still fits; if even the default is too wide for
+        // this terminal, keep the default rather than shrink below it.
+        NameWidth::Fit(term) => (NAME_CAP..=longest)
+            .rev()
+            .find(|&cap| table_w(cap) <= *term)
+            .unwrap_or(NAME_CAP),
+    };
+
+    let names: Vec<&str> = cols.iter().map(Column::name).collect();
+    let shown = distinct_names(&names, cap, g.more);
+    let widths: Vec<usize> = (0..cols.len())
+        .map(|i| width(&shown[i]).max(body[i]))
+        .collect();
+
+    // Right-aligned in its column, with colour around the text only so the
+    // padding stays exact.
+    let cell = |s: &str, w: usize, style: Option<&str>| -> String {
+        let pad = " ".repeat(w.saturating_sub(width(s)));
+        match style {
+            Some(code) if color => format!("{pad}{code}{s}{RESET}"),
+            _ => format!("{pad}{s}"),
+        }
+    };
+    let line = |first: String, rest: Vec<String>| -> String {
+        std::iter::once(first).chain(rest).collect::<Vec<_>>().join(GAP)
+    };
+    let vram_style = |s: &str| if s == "-" { Some(DIM) } else { Some(VRAM) };
+
+    let mut out = Vec::new();
+    out.push(line(
+        bold(&pad_right("GPU", gpu_w), color),
+        (0..cols.len())
+            .map(|i| {
+                let style = if cols[i].container.is_some() { CONTAINER } else { DIM };
+                cell(&shown[i], widths[i], Some(style))
+            })
+            .collect(),
+    ));
+    out.push(line(
+        " ".repeat(gpu_w),
+        (0..cols.len()).map(|i| cell(&users[i], widths[i], Some(NAME))).collect(),
+    ));
+    let rule = "-".repeat(gpu_w + widths.iter().map(|w| GAP.len() + w).sum::<usize>());
+    out.push(rule.clone());
+    for (row, id) in gpus.iter().enumerate() {
+        out.push(line(
+            pad_right(&id.to_string(), gpu_w),
+            (0..cols.len())
+                .map(|i| cell(&cells[i][row], widths[i], vram_style(&cells[i][row])))
+                .collect(),
+        ));
+    }
+    out.push(rule);
+    out.push(line(
+        bold(&pad_right("Total", gpu_w), color),
+        (0..cols.len()).map(|i| cell(&totals[i], widths[i], Some(VRAM))).collect(),
+    ));
+    out
+}
+
+/// Each name cut to `cap` columns from the end, the way a reader expects -
+/// except where that makes different names look alike:
+/// `bench-oneocr0930_10427-g4` and `...-g5` would both come out as
+/// `bench-oneocr093…`. Those are cut from the middle instead, keeping the tail
+/// where such names usually differ (`bench-o…10427-g4`), and widened until
+/// they differ if even that is not enough.
+fn distinct_names(names: &[&str], cap: usize, more: &str) -> Vec<String> {
+    let mut shown: Vec<String> = names
+        .iter()
+        .map(|n| ellipsize(n, cap, more).into_owned())
+        .collect();
+
+    // Each pass settles one group of look-alikes; the bound only matters if
+    // settling one ever made another, which takes contrived names.
+    for _ in 0..names.len() {
+        let Some(first) = (0..names.len()).find(|&i| {
+            (0..names.len()).any(|j| shown[j] == shown[i] && names[j] != names[i])
+        }) else {
+            break;
+        };
+        let group: Vec<usize> = (0..names.len())
+            .filter(|&j| shown[j] == shown[first])
+            .collect();
+        let longest = group.iter().map(|&j| width(names[j])).max().unwrap_or(cap);
+
+        let mut w = cap;
+        let cut = loop {
+            let cut: Vec<String> = group.iter().map(|&j| cut_middle(names[j], w, more)).collect();
+            let clash = group.iter().enumerate().any(|(a, &ja)| {
+                group
+                    .iter()
+                    .enumerate()
+                    .any(|(b, &jb)| cut[a] == cut[b] && names[ja] != names[jb])
+            });
+            if !clash || w >= longest {
+                break cut;
+            }
+            w += 1;
+        };
+        for (k, &j) in group.iter().enumerate() {
+            shown[j] = cut[k].clone();
+        }
+    }
+    shown
+}
+
+/// `s` in at most `w` columns, with the cut in the middle: the head, `more`,
+/// then a tail one character longer than the head when they can't be even.
+fn cut_middle(s: &str, w: usize, more: &str) -> String {
+    let len = width(s);
+    let Some(keep) = w.checked_sub(width(more)).filter(|_| len > w) else {
+        return ellipsize(s, w, more).into_owned();
+    };
+    let head = keep / 2;
+    let tail = keep - head;
+    let tail_at = s.char_indices().nth(len - tail).map_or(s.len(), |(i, _)| i);
+    format!("{}{more}{}", truncate(s, head), &s[tail_at..])
 }
 
 /// One piece of the Process Detail section, in GPU order.

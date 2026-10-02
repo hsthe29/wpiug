@@ -131,6 +131,48 @@ pub fn term_width() -> Option<usize> {
     std::env::var("COLUMNS").ok()?.parse().ok()
 }
 
+/// Login name for `uid`, looked up through NSS the way `ps` does it, so LDAP
+/// and SSSD accounts resolve too. `None` if no account has that uid.
+pub fn user_name(uid: u32) -> Option<String> {
+    use std::ffi::{c_char, c_int, CStr};
+
+    // `struct passwd`, identical in glibc and musl on Linux.
+    #[repr(C)]
+    struct Passwd {
+        name: *mut c_char,
+        passwd: *mut c_char,
+        uid: u32,
+        gid: u32,
+        gecos: *mut c_char,
+        dir: *mut c_char,
+        shell: *mut c_char,
+    }
+
+    extern "C" {
+        fn getpwuid_r(
+            uid: u32,
+            pwd: *mut Passwd,
+            buf: *mut c_char,
+            len: usize,
+            result: *mut *mut Passwd,
+        ) -> c_int;
+    }
+
+    let mut pwd = std::mem::MaybeUninit::<Passwd>::uninit();
+    // Far more than any real entry needs; a bigger one just reads as unknown.
+    let mut buf = vec![0 as c_char; 16 * 1024];
+    let mut found: *mut Passwd = std::ptr::null_mut();
+    // Safe: getpwuid_r writes only into `pwd` and `buf`, both as large as we
+    // say, and on success points `found` at `pwd`, whose strings live in `buf`.
+    unsafe {
+        let rc = getpwuid_r(uid, pwd.as_mut_ptr(), buf.as_mut_ptr(), buf.len(), &mut found);
+        if rc != 0 || found.is_null() {
+            return None;
+        }
+        Some(CStr::from_ptr((*found).name).to_string_lossy().into_owned())
+    }
+}
+
 pub fn pad_right(s: &str, w: usize) -> String {
     let len = width(s);
     if len >= w {

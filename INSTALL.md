@@ -47,7 +47,7 @@ cargo install --path .
 The binary lands in `~/.cargo/bin/wpiug`, which rustup already put on your
 `PATH`, so `wpiug` works immediately in a new shell. `cargo install` always
 builds in release mode and honours the `[profile.release]` settings in
-`Cargo.toml`, so you get the same optimised ~450 KB binary as a manual build.
+`Cargo.toml`, so you get the same optimised ~490 KB binary as a manual build.
 
 Re-running `cargo install --path .` after a `git pull` replaces the installed
 copy — no `--force` needed for path installs. (If cargo ever refuses because the
@@ -72,7 +72,7 @@ rather than installed on this one:
 cargo build --release
 ```
 
-The binary lands at `target/release/wpiug` (~450 KB, builds in a few seconds).
+The binary lands at `target/release/wpiug` (~490 KB, builds in a few seconds).
 Put it on your `PATH` for just your user:
 
 ```bash
@@ -133,6 +133,21 @@ rocm-smi --showbus
 You do **not** need to be in the `render` or `video` group: `wpiug` reads sysfs
 attributes, it never opens `/dev/kfd` or `/dev/dri/*`. Processes owned by other
 users show up normally.
+
+**Exact VRAM for other users' processes needs root.** KFD's per-process VRAM
+counter misses memory allocated through the render node — PyTorch's
+`expandable_segments` puts nearly all of a job's memory there — so `wpiug` also
+reads `/proc/<pid>/fdinfo`, which the kernel only shows for your own processes
+(or anyone's, to root). Without root, other users' processes fall back to KFD's
+figure; when that leaves more than 1 GiB on a GPU unaccounted for, `wpiug`
+prints a note on stderr. Your own processes are always counted in full.
+
+```bash
+sudo "$(command -v wpiug)"   # exact VRAM for every process on the node
+```
+
+(`sudo wpiug` alone works only for a system-wide install — sudo's `PATH`
+usually leaves out `~/.cargo/bin`.)
 
 **Container *names* are the one exception.** Turning a container id into a
 readable name requires talking to the container runtime, so it needs whatever
